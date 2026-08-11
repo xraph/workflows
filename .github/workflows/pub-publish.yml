@@ -1,0 +1,179 @@
+name: Pub Publish
+
+# Publishes one or more Dart/Flutter packages to pub.dev from a single job, in a
+# caller-supplied order.
+#
+# ORDER IS THE REASON THIS EXISTS rather than a call to dart-lang/setup-dart's
+# publish.yml. That workflow takes a single working-directory, so a repository
+# publishing a core package plus dependents needs one job per package and gets no
+# ordering between them. It also has no dry-run, and its inputs are fixed, so a
+# caller cannot wrap it to add either.
+#
+# AUTHENTICATION IS OIDC, NOT A TOKEN. Nothing is passed in: dart-lang/setup-dart
+# exchanges the job's id-token for a pub.dev credential. pub.dev honours that
+# credential only when the run was triggered by pushing a tag matching the pattern
+# configured under Admin -> Automated publishing on each package, and each
+# package's `version` in pubspec.yaml must equal the version in that tag. A run on
+# a branch is rejected server-side, so off a tag dry-run is the only usable mode.
+# That is also why there is no `version` input -- stamping a version here would
+# produce an archive pub.dev then refuses for disagreeing with the tag.
+
+on:
+  workflow_call:
+    inputs:
+      packages:
+        description: >-
+          JSON array of package directories, in publish order, e.g.
+          '["flutter/packages/core","flutter/packages/ui"]'. Dependencies first.
+        type: string
+        required: true
+      dry-run:
+        description: >-
+          Validate and pack without publishing. The default is true so that a
+          misconfigured caller rehearses instead of claiming a package name --
+          a pub.dev version can only be retracted for 7 days and the name is
+          never freed, so a wrong first publish is effectively permanent.
+        type: boolean
+        default: true
+      flutter-channel:
+        description: >-
+          Flutter release channel. A Flutter SDK is installed even for pure-Dart
+          packages: its bundled `dart` publishes both kinds, and a pure-Dart
+          package that is a workspace member still resolves the whole workspace,
+          which may contain Flutter members.
+        type: string
+        default: 'stable'
+      environment:
+        description: 'If set, the job runs in this environment (for approval gates).'
+        type: string
+        required: false
+    outputs:
+      published:
+        description: 'JSON array of "name@version" strings actually published. Empty on a dry run.'
+        value: ${{ jobs.publish.outputs.published }}
+
+jobs:
+  publish:
+    name: Publish
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      id-token: write # Required to mint the OIDC token pub.dev authenticates with.
+    outputs:
+      published: ${{ steps.publish.outputs.published }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # Order matters. setup-dart provisions the pub.dev OIDC credential, then the
+      # Flutter SDK's `dart` shadows this one on PATH -- which is what we want, as
+      # only that binary can resolve `sdk: flutter` dependencies. The credential
+      # lives in the shared pub config dir, so the shadowing binary still sees it.
+      - name: Set up Dart
+        uses: dart-lang/setup-dart@v1
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: ${{ inputs.flutter-channel }}
+
+      - name: Validate inputs
+        shell: bash
+        env:
+          PACKAGES: ${{ inputs.packages }}
+        run: |
+          set -euo pipefail
+
+          # Fail on a malformed list here rather than half way through a publish
+          # loop, where the packages before the bad entry are already public.
+          if ! printf '%s' "$PACKAGES" | jq -e 'type == "array" and length > 0' >/dev/null; then
+            echo "::error::packages must be a non-empty JSON array"
+            exit 1
+          fi
+
+          while read -r dir; do
+            if [ ! -f "$dir/pubspec.yaml" ]; then
+              echo "::error::no pubspec.yaml at $dir"
+              exit 1
+            fi
+          done < <(printf '%s' "$PACKAGES" | jq -r '.[]')
+
+      - name: Require a tag for a real publish
+        if: ${{ !inputs.dry-run }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # pub.dev rejects a non-tag run anyway, but it does so after the archive
+          # has been uploaded and only for the first package. Failing up front
+          # keeps the error legible and avoids a partial release.
+          if [ "${GITHUB_REF_TYPE:-}" != "tag" ]; then
+            echo "::error::dry-run is false but this run was not triggered by a tag push (ref ${GITHUB_REF:-unknown}); pub.dev only accepts automated publishing from a tag"
+            exit 1
+          fi
+
+      - name: Publish
+        id: publish
+        shell: bash
+        env:
+          PACKAGES: ${{ inputs.packages }}
+          DRY_RUN: ${{ inputs.dry-run }}
+        run: |
+          set -euo pipefail
+
+          PUBLISHED='[]'
+
+          while read -r dir; do
+            # pubspec.yaml is read with sed rather than a YAML parser to avoid
+            # depending on a `yq` flavour being present on the runner. `name` and
+            # `version` are required top-level scalars, so this is well defined.
+            name=$(sed -n 's/^name:[[:space:]]*\(.*\)$/\1/p' "$dir/pubspec.yaml" | head -1 | tr -d "\"'")
+            version=$(sed -n 's/^version:[[:space:]]*\(.*\)$/\1/p' "$dir/pubspec.yaml" | head -1 | tr -d "\"'")
+
+            if [ -z "$name" ] || [ -z "$version" ]; then
+              echo "::error::could not read name/version from $dir/pubspec.yaml"
+              exit 1
+            fi
+
+            echo "::group::$name $version ($dir)"
+
+            # Re-running a release whose later packages failed must not die on the
+            # ones that already succeeded -- that is the common recovery path, and
+            # pub.dev rejects a duplicate version with a hard error.
+            if curl -sfI "https://pub.dev/api/packages/$name/versions/$version" >/dev/null 2>&1; then
+              echo "$name@$version is already on pub.dev, skipping"
+              echo "::endgroup::"
+              continue
+            fi
+
+            # -C resolves the enclosing workspace when the package is a member,
+            # which is what makes path-free workspace deps resolve locally.
+            dart pub get -C "$dir"
+            dart pub publish -C "$dir" --dry-run
+
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "would publish $name@$version"
+            else
+              dart pub publish -C "$dir" --force
+              PUBLISHED=$(printf '%s' "$PUBLISHED" | jq -c --arg e "$name@$version" '. + [$e]')
+            fi
+
+            echo "::endgroup::"
+          done < <(printf '%s' "$PACKAGES" | jq -r '.[]')
+
+          echo "published=$PUBLISHED" >> "$GITHUB_OUTPUT"
+
+      - name: Summary
+        if: always()
+        shell: bash
+        env:
+          DRY_RUN: ${{ inputs.dry-run }}
+          PUBLISHED: ${{ steps.publish.outputs.published }}
+        run: |
+          set -euo pipefail
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "Dry run - nothing was published." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Published:" >> "$GITHUB_STEP_SUMMARY"
+            printf '%s' "${PUBLISHED:-[]}" | jq -r '.[] | "- `\(.)`"' >> "$GITHUB_STEP_SUMMARY"
+          fi
