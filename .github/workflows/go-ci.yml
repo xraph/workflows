@@ -129,6 +129,10 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version: ${{ matrix.go-version }}
+          # Resolve a bare minor (e.g. "1.26") to the newest patch instead of whatever
+          # the runner toolcache happens to hold, which otherwise pins security scans to
+          # a stale, vulnerable Go.
+          check-latest: true
           cache-dependency-path: ${{ inputs.working-directory }}/go.mod
 
       - name: Set up Node.js
@@ -263,6 +267,10 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version: ${{ needs.setup.outputs.primary-go-version }}
+          # Resolve a bare minor (e.g. "1.26") to the newest patch instead of whatever
+          # the runner toolcache happens to hold, which otherwise pins security scans to
+          # a stale, vulnerable Go.
+          check-latest: true
           cache-dependency-path: ${{ inputs.working-directory }}/go.mod
 
       - name: Run golangci-lint
@@ -291,6 +299,10 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version: ${{ needs.setup.outputs.primary-go-version }}
+          # Resolve a bare minor (e.g. "1.26") to the newest patch instead of whatever
+          # the runner toolcache happens to hold, which otherwise pins security scans to
+          # a stale, vulnerable Go.
+          check-latest: true
           cache-dependency-path: ${{ inputs.working-directory }}/go.mod
 
       - name: Check formatting
@@ -354,6 +366,10 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version: ${{ needs.setup.outputs.primary-go-version }}
+          # Resolve a bare minor (e.g. "1.26") to the newest patch instead of whatever
+          # the runner toolcache happens to hold, which otherwise pins security scans to
+          # a stale, vulnerable Go.
+          check-latest: true
           cache-dependency-path: ${{ inputs.working-directory }}/go.mod
 
       - name: Run gosec
