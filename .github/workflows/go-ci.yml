@@ -63,6 +63,10 @@ on:
         description: 'Fail the build on gosec findings. SARIF is uploaded either way.'
         type: boolean
         default: true
+      check-nested-modules:
+        description: 'Check that nested go.mod files require their siblings at versions the module proxy can serve. A nested module replace is ignored once the module is somebody else dependency, so a require naming an unpublished version breaks go get for every consumer while every local build keeps working. No-op in a repo with a single go.mod.'
+        type: boolean
+        default: true
     secrets:
       CODECOV_TOKEN:
         required: false
@@ -444,4 +448,112 @@ jobs:
             echo "Failing because govulncheck-fail-on-findings is true."
             exit 1
           fi
-          echo "govulncheck-fail-on-findings is false; reporting only." 
+          echo "govulncheck-fail-on-findings is false; reporting only."
+
+  nested-modules:
+    name: Nested modules
+    runs-on: ubuntu-latest
+    if: inputs.check-nested-modules
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: ${{ inputs.primary-go-version || '1.25' }}
+          cache: false
+
+      - name: Check intra-repo requires resolve
+        shell: bash
+        run: |
+          # Check that every intra-repo require in a nested module names a version a
+          # consumer can actually resolve.
+          #
+          # A nested module carries a replace so the working tree builds against
+          # itself. That replace is ignored the moment the module becomes somebody
+          # else's dependency, so the require line is what a consumer resolves. If it
+          # names a version that was never published, `go get` on that nested module
+          # fails outright, and no ordinary build notices because the replace hides it.
+          #
+          #   default mode  fails on v0.0.0 and on anything that is not valid semver.
+          #                 A version that simply is not published yet is reported and
+          #                 tolerated, because release rewrites these before tagging.
+          #   --strict      additionally requires every version to be live on the
+          #                 proxy. Run this after tagging, when it must all be true.
+          set -uo pipefail
+
+          STRICT=0
+          [ "${1:-}" = "--strict" ] && { STRICT=1; shift; }
+          cd "${1:-.}"
+
+          ROOT=$(awk '/^module /{print $2; exit}' go.mod 2>/dev/null || true)
+          if [ -z "$ROOT" ]; then
+          	echo "no root go.mod, nothing to check"
+          	exit 0
+          fi
+
+          # The proxy encodes an uppercase letter as !x. xraph paths are lowercase but
+          # the encoding is part of the protocol, so do it properly.
+          escape() { printf '%s' "$1" | sed -E 's/([A-Z])/!\L\1/g'; }
+
+          fail=0
+          checked=0
+          pending=0
+          # Portable memo of proxy answers. An associative array would be neater but
+          # needs bash 4, and on bash 3.2 it fails in a way that silently undercounts
+          # instead of erroring, which is worse than being a little verbose here.
+          seen_ok=""
+          seen_missing=""
+          while IFS= read -r f; do
+          	[ "$f" = "./go.mod" ] && continue
+          	dir=${f%/go.mod}; dir=${dir#./}
+          	while read -r path ver; do
+          		[ -z "$path" ] && continue
+          		checked=$((checked + 1))
+
+          		if [ "$ver" = "v0.0.0" ]; then
+          			echo "::error file=${f#./}::$path is required at v0.0.0, which is not a version anyone can fetch. Someone running 'go get $path' gets 'unknown revision v0.0.0'. It works for you only because you already require $ROOT at a real version. Name a released version here; the replace directive keeps local builds on the working tree."
+          			fail=1
+          			continue
+          		fi
+          		if ! printf '%s' "$ver" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'; then
+          			echo "::error file=${f#./}::$path is required at '$ver', which is not a semver version."
+          			fail=1
+          			continue
+          		fi
+
+          		# Most nested modules in a repo require the same root version, so
+          		# ask the proxy once per distinct pair rather than once per module.
+          		key="${path}@${ver}"
+          		case "$seen_ok" in
+          		*"|${key}|"*) continue ;;
+          		esac
+          		case "$seen_missing" in
+          		*"|${key}|"*) ;;
+          		*)
+          			if curl -sSfL --max-time 20 "https://proxy.golang.org/$(escape "$path")/@v/${ver}.info" > /dev/null 2>&1; then
+          				seen_ok="${seen_ok}|${key}|"
+          				continue
+          			fi
+          			seen_missing="${seen_missing}|${key}|"
+          			;;
+          		esac
+          		if [ "$STRICT" -eq 1 ]; then
+          			echo "::error file=${f#./}::$path@$ver is not on the module proxy, so nobody can consume $dir."
+          			fail=1
+          		else
+          			echo "::notice file=${f#./}::$path@$ver is not published yet. Fine before a first release, since release pins these to the tag it cuts, but it has to be real by then."
+          			pending=$((pending + 1))
+          		fi
+          	done < <(go mod edit -json "$f" 2>/dev/null | jq -r --arg r "$ROOT" '.Require[]? | select(.Path == $r or (.Path | startswith($r + "/"))) | "\(.Path) \(.Version)"')
+          done < <(find . -name go.mod -not -path './.git/*' -not -path '*/node_modules/*' -not -path './.claude/*' -not -path '*/testdata/*' -not -path '*/vendor/*' | sort)
+
+          if [ "$checked" -eq 0 ]; then
+          	echo "no nested module requires anything from this repo, nothing to check"
+          elif [ "$fail" -eq 0 ]; then
+          	echo "checked $checked intra-repo require(s), all resolvable ($pending not published yet)"
+          fi
+          exit "$fail"

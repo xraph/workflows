@@ -15,9 +15,17 @@ on:
         type: string
         default: ''
       submodules:
-        description: 'JSON array of package suffixes within the root module, e.g. ["errs","log"] (like go-utils). NOT for repos with genuinely nested go.mod files - those need their own per-submodule tags (e.g. discovery/v1.2.0), which this workflow does not create.'
+        description: 'JSON array of package suffixes within the root module, e.g. ["errs","log"] (like go-utils). These are packages, not modules: they ship inside the root module and only need naming so the release notes mention them. A directory with its own go.mod is a different thing and belongs in nested-modules, which tags it separately.'
         type: string
         default: '[]'
+      nested-modules:
+        description: 'JSON array of directories holding their own go.mod, e.g. ["drivers/pgdriver","extension"]. Empty means discover them. Each is released by tagging <dir>/<version>, which is how the proxy finds a version for a module that is not at the repo root. Set to "[]" and skip-nested-modules to opt out.'
+        type: string
+        default: ''
+      skip-nested-modules:
+        description: 'Do not touch nested go.mod files at all.'
+        type: boolean
+        default: false
       doc-links:
         description: 'JSON array of repo-relative doc paths, e.g. ["errs/README.md"]'
         type: string
@@ -226,6 +234,128 @@ jobs:
           git tag -a "$VERSION" -m "Release $VERSION"
           git push origin "$VERSION"
 
+      - name: Discover nested modules
+        id: nested
+        if: ${{ !inputs.skip-nested-modules }}
+        shell: bash
+        env:
+          NESTED_IN: ${{ inputs.nested-modules }}
+        run: |
+          set -euo pipefail
+          if [ -n "$NESTED_IN" ]; then
+            LIST=$(printf '%s' "$NESTED_IN" | jq -r '.[]')
+          else
+            LIST=$(find . -name go.mod \
+              -not -path './.git/*' -not -path '*/node_modules/*' \
+              -not -path './.claude/*' -not -path '*/testdata/*' \
+              -not -path '*/vendor/*' \
+              | sed 's|^\./||; s|/go\.mod$||' | grep -v '^go\.mod$' | sort)
+          fi
+          {
+            echo "list<<NESTED_EOF"
+            printf '%s\n' "$LIST"
+            echo "NESTED_EOF"
+          } >> "$GITHUB_OUTPUT"
+          if [ -z "$LIST" ]; then
+            echo "No nested modules." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### Nested modules" >> "$GITHUB_STEP_SUMMARY"
+            printf '%s\n' "$LIST" | while IFS= read -r m; do
+              [ -n "$m" ] && echo "- $m" >> "$GITHUB_STEP_SUMMARY"
+            done
+          fi
+
+      - name: Verify nested modules
+        if: ${{ !inputs.skip-nested-modules && inputs.run-tests }}
+        shell: bash
+        env:
+          LIST: ${{ steps.nested.outputs.list }}
+        run: |
+          set -euo pipefail
+          for mod in $LIST; do
+            echo "::group::$mod"
+            ( cd "$mod" && go mod download && go build ./... && go test -race -count=1 ./... )
+            echo "::endgroup::"
+          done
+
+      - name: Pin and tag nested modules
+        if: ${{ !inputs.skip-nested-modules }}
+        shell: bash
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          LIST: ${{ steps.nested.outputs.list }}
+        run: |
+          set -euo pipefail
+          [ -z "$LIST" ] && exit 0
+          ROOT=$(awk '/^module /{print $2; exit}' go.mod)
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # A nested module carries a replace so the working tree builds
+          # against itself, and that replace is ignored the moment the module
+          # is somebody else dependency. The require line is what a consumer
+          # resolves, so on a branch it names the previous release and here it
+          # has to name the one being cut. Pin, commit, tag the commit.
+          #
+          # The commit is never pushed to a branch. It is reachable only
+          # through these tags, so the branch keeps pointing nested modules at
+          # the last release and keeps building against the working tree.
+          # go mod edit rather than a regex: it understands both the
+          # parenthesised block and the single-line require form, it never
+          # touches a replace, and it refuses a version whose major does not
+          # match the path suffix. A sed would quietly accept all three.
+          for mod in $LIST; do
+            paths=$(go mod edit -json "$mod/go.mod" \
+              | jq -r --arg r "$ROOT" '.Require[]? | select(.Path == $r or (.Path | startswith($r + "/"))) | .Path')
+            for path in $paths; do
+              go mod edit -require="${path}@${VERSION}" "$mod/go.mod"
+            done
+            git add "$mod/go.mod"
+          done
+          if [ -n "$(git diff --cached --name-only)" ]; then
+            git commit -q -m "chore: pin nested modules to $VERSION"
+          fi
+
+          for mod in $LIST; do
+            MOD_TAG="$mod/$VERSION"
+            if git rev-parse -q --verify "refs/tags/$MOD_TAG" >/dev/null; then
+              echo "$MOD_TAG already exists, skipping"
+              continue
+            fi
+            git tag -a "$MOD_TAG" -m "Release $MOD_TAG"
+            git push origin "$MOD_TAG"
+            echo "tagged $MOD_TAG"
+          done
+
+      - name: Verify nested modules resolve from the proxy
+        if: ${{ !inputs.skip-nested-modules }}
+        shell: bash
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          LIST: ${{ steps.nested.outputs.list }}
+        run: |
+          set -euo pipefail
+          [ -z "$LIST" ] && exit 0
+          ROOT=$(awk '/^module /{print $2; exit}' go.mod)
+          # The failure this catches is a nested module whose require names a
+          # version the proxy cannot serve. Every local build hides it behind
+          # the replace, so the first person to run go get finds it instead.
+          PROBE=$(mktemp -d)
+          trap 'rm -rf "$PROBE"' EXIT
+          cd "$PROBE"
+          go mod init example.com/release-probe >/dev/null
+          rc=0
+          for mod in $LIST; do
+            echo "::group::go get $ROOT/$mod@$VERSION"
+            if ! GOFLAGS=-mod=mod GOPROXY=https://proxy.golang.org,direct \
+                 go get "$ROOT/$mod@$VERSION"; then
+              echo "::error::$ROOT/$mod@$VERSION does not resolve for a consumer."
+              rc=1
+            fi
+            echo "::endgroup::"
+          done
+          exit "$rc"
+
       - name: Assemble release notes
         id: notes
         shell: bash
@@ -235,6 +365,7 @@ jobs:
           SUBMODULES: ${{ inputs.submodules }}
           DOC_LINKS: ${{ inputs.doc-links }}
           CHANGELOG_BODY: ${{ steps.changelog.outputs.body }}
+          NESTED_LIST: ${{ steps.nested.outputs.list }}
         run: |
           set -euo pipefail
           MODULE="$MODULE_IN"
@@ -251,6 +382,9 @@ jobs:
             echo "go get ${MODULE}@${VERSION}"
             printf '%s' "$SUBMODULES" | jq -r --arg m "$MODULE" --arg v "$VERSION" \
               '.[] | "go get \($m)/\(.)@\($v)"'
+            for nested in $NESTED_LIST; do
+              echo "go get ${MODULE}/${nested}@${VERSION}"
+            done
             echo '```'
             echo
             echo '## Changes'
@@ -285,9 +419,13 @@ jobs:
           VERSION: ${{ steps.ver.outputs.version }}
           MODULE: ${{ steps.notes.outputs.module }}
           SUBMODULES: ${{ inputs.submodules }}
+          NESTED_LIST: ${{ steps.nested.outputs.list }}
         run: |
           set -euo pipefail
           curl -sSf "https://proxy.golang.org/${MODULE}/@v/${VERSION}.info" || true
           for sub in $(printf '%s' "$SUBMODULES" | jq -r '.[]'); do
             curl -sSf "https://proxy.golang.org/${MODULE}/${sub}/@v/${VERSION}.info" || true
+          done
+          for nested in $NESTED_LIST; do
+            curl -sSf "https://proxy.golang.org/${MODULE}/${nested}/@v/${VERSION}.info" || true
           done
