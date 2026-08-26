@@ -248,7 +248,7 @@ jobs:
             LIST=$(find . -name go.mod \
               -not -path './.git/*' -not -path '*/node_modules/*' \
               -not -path './.claude/*' -not -path '*/testdata/*' \
-              -not -path '*/vendor/*' \
+              -not -path '*/vendor/*' -not -path '*/_*' \
               | sed 's|^\./||; s|/go\.mod$||' | grep -v '^go\.mod$' | sort)
           fi
           {

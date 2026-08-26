@@ -553,7 +553,7 @@ jobs:
           			pending=$((pending + 1))
           		fi
           	done < <(go mod edit -json "$f" 2>/dev/null | jq -r --arg r "$ROOT" '.Require[]? | select(.Path == $r or (.Path | startswith($r + "/"))) | "\(.Path) \(.Version)"')
-          done < <(find . -name go.mod -not -path './.git/*' -not -path '*/node_modules/*' -not -path './.claude/*' -not -path '*/testdata/*' -not -path '*/vendor/*' | sort)
+          done < <(find . -name go.mod -not -path './.git/*' -not -path '*/node_modules/*' -not -path './.claude/*' -not -path '*/testdata/*' -not -path '*/vendor/*' -not -path '*/_*' | sort)
 
           if [ "$checked" -eq 0 ]; then
           	echo "no nested module requires anything from this repo, nothing to check"
