@@ -514,8 +514,12 @@ jobs:
           		[ -z "$path" ] && continue
           		checked=$((checked + 1))
 
-          		if [ "$ver" = "v0.0.0" ]; then
-          			echo "::error file=${f#./}::$path is required at v0.0.0, which is not a version anyone can fetch. Someone running 'go get $path' gets 'unknown revision v0.0.0'. It works for you only because you already require $ROOT at a real version. Name a released version here; the replace directive keeps local builds on the working tree."
+          		# v0.0.0 and the zero pseudo-version are the two shapes Go leaves
+          		# behind when a module is only ever reached through a replace. The
+          		# second is valid semver, which is exactly why it slips past a
+          		# format check, and it resolves for nobody.
+          		if [ "$ver" = "v0.0.0" ] || [ "$ver" = "v0.0.0-00010101000000-000000000000" ]; then
+          			echo "::error file=${f#./}::$path is required at $ver, which is not a version anyone can fetch. Someone running 'go get $path' gets 'unknown revision v0.0.0'. It works for you only because you already require $ROOT at a real version. Name a released version here; the replace directive keeps local builds on the working tree."
           			fail=1
           			continue
           		fi
