@@ -1,3 +1,19 @@
+# Private Go module dependencies
+#
+# A repo whose go.mod requires a private repo in this org needs the module
+# proxy path authenticated before any `go` command touches the network. Pass
+# the org secret through:
+#
+#   secrets:
+#     XRAPH_REPO_TOKEN: ${{ secrets.XRAPH_REPO_TOKEN }}
+#
+# A caller using `secrets: inherit` gets this automatically, no change
+# needed. A caller passing secrets explicitly (as the README recommends)
+# must add the line above itself, alongside CODECOV_TOKEN.
+#
+# The secret is optional. Leave it unset and every job runs exactly as it
+# does today - the auth step becomes a no-op.
+
 name: Go CI
 
 on:
@@ -67,8 +83,15 @@ on:
         description: 'Check that nested go.mod files require their siblings at versions the module proxy can serve. A nested module replace is ignored once the module is somebody else dependency, so a require naming an unpublished version breaks go get for every consumer while every local build keeps working. No-op in a repo with a single go.mod.'
         type: boolean
         default: true
+      private-module-pattern:
+        description: 'GOPRIVATE pattern applied when XRAPH_REPO_TOKEN is set. Only takes effect if the secret is present.'
+        type: string
+        default: 'github.com/xraph/*'
     secrets:
       CODECOV_TOKEN:
+        required: false
+      XRAPH_REPO_TOKEN:
+        description: 'Org token for resolving private github.com/xraph/* Go modules. Optional - unset means public-only, matching current behavior.'
         required: false
 
 jobs:
@@ -128,6 +151,17 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+
+      - name: Configure Go module auth
+        env:
+          XRAPH_REPO_TOKEN: ${{ secrets.XRAPH_REPO_TOKEN }}
+          PRIVATE_MODULE_PATTERN: ${{ inputs.private-module-pattern }}
+        run: |
+          set -euo pipefail
+          if [ -n "${XRAPH_REPO_TOKEN}" ]; then
+            git config --global url."https://x-access-token:${XRAPH_REPO_TOKEN}@github.com/".insteadOf "https://github.com/"
+            echo "GOPRIVATE=${PRIVATE_MODULE_PATTERN}" >> "$GITHUB_ENV"
+          fi
 
       - name: Set up Go
         uses: actions/setup-go@v7
@@ -267,6 +301,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Configure Go module auth
+        env:
+          XRAPH_REPO_TOKEN: ${{ secrets.XRAPH_REPO_TOKEN }}
+          PRIVATE_MODULE_PATTERN: ${{ inputs.private-module-pattern }}
+        run: |
+          set -euo pipefail
+          if [ -n "${XRAPH_REPO_TOKEN}" ]; then
+            git config --global url."https://x-access-token:${XRAPH_REPO_TOKEN}@github.com/".insteadOf "https://github.com/"
+            echo "GOPRIVATE=${PRIVATE_MODULE_PATTERN}" >> "$GITHUB_ENV"
+          fi
+
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
@@ -298,6 +343,17 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+
+      - name: Configure Go module auth
+        env:
+          XRAPH_REPO_TOKEN: ${{ secrets.XRAPH_REPO_TOKEN }}
+          PRIVATE_MODULE_PATTERN: ${{ inputs.private-module-pattern }}
+        run: |
+          set -euo pipefail
+          if [ -n "${XRAPH_REPO_TOKEN}" ]; then
+            git config --global url."https://x-access-token:${XRAPH_REPO_TOKEN}@github.com/".insteadOf "https://github.com/"
+            echo "GOPRIVATE=${PRIVATE_MODULE_PATTERN}" >> "$GITHUB_ENV"
+          fi
 
       - name: Set up Go
         uses: actions/setup-go@v7
@@ -365,6 +421,17 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+
+      - name: Configure Go module auth
+        env:
+          XRAPH_REPO_TOKEN: ${{ secrets.XRAPH_REPO_TOKEN }}
+          PRIVATE_MODULE_PATTERN: ${{ inputs.private-module-pattern }}
+        run: |
+          set -euo pipefail
+          if [ -n "${XRAPH_REPO_TOKEN}" ]; then
+            git config --global url."https://x-access-token:${XRAPH_REPO_TOKEN}@github.com/".insteadOf "https://github.com/"
+            echo "GOPRIVATE=${PRIVATE_MODULE_PATTERN}" >> "$GITHUB_ENV"
+          fi
 
       - name: Set up Go
         uses: actions/setup-go@v7

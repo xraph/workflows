@@ -189,6 +189,32 @@ npm-global-packages: 'typescript@5.8.2 esbuild@0.28.1'
 
 Both default to empty, so nothing is installed unless asked.
 
+## Private Go module dependencies
+
+A repo whose go.mod requires a private repo in this org needs the module
+proxy authenticated before any `go` command touches the network, and a
+reusable workflow's caller cannot inject a step into its jobs to do that
+itself. `go-ci.yml` covers it directly: pass the org secret through, and a
+"Configure Go module auth" step runs in `test`, `lint`, `verify` and
+`security`, before that job's `Set up Go` step, so it takes effect for
+`go mod download`, `golangci-lint`, `go vet`, `gosec` and `govulncheck` alike.
+
+```yaml
+secrets:
+  CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+  XRAPH_REPO_TOKEN: ${{ secrets.XRAPH_REPO_TOKEN }}
+```
+
+The secret is optional and defaults to unset, so every existing caller is
+unaffected. If your workflow uses `secrets: inherit`, you already get this
+for free and there is nothing to change. If you pass secrets explicitly, as
+recommended above, add the `XRAPH_REPO_TOKEN` line yourself alongside
+`CODECOV_TOKEN`.
+
+The step sets `GOPRIVATE` to `github.com/xraph/*` by default. Override it
+with the `private-module-pattern` input if your module paths need a
+different pattern, though that should be rare inside this org.
+
 ## Escaping the Makefile probe
 
 `go-ci.yml` prefers a Makefile target when one matching the step exists. That
