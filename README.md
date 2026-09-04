@@ -189,6 +189,43 @@ npm-global-packages: 'typescript@5.8.2 esbuild@0.28.1'
 
 Both default to empty, so nothing is installed unless asked.
 
+## Private modules
+
+`kgkit` is private. Anything that depends on it dies at `go mod download` with
+"repository not found", which reads like a typo in the import path and isn't
+one: Go asked proxy.golang.org, got a 404 back, and never got as far as trying
+git, because nothing had told it that path was private to begin with.
+
+Hand the workflow a token with read access and it sorts out the rest:
+
+```yaml
+jobs:
+  ci:
+    uses: xraph/workflows/.github/workflows/go-ci.yml@v1
+    with:
+      goprivate: github.com/xraph/kgkit
+    secrets:
+      XRAPH_REPO_TOKEN: ${{ secrets.XRAPH_REPO_TOKEN }}
+```
+
+Every job that downloads dependencies rewrites `https://github.com/xraph/`
+to carry that token, then sets `GOPRIVATE` so those paths skip the proxy and go
+straight to git. Leave the secret out and the step does nothing. A public-only
+repo never has to think about it. The rewrite is scoped to the org and not to
+all of github.com, so it won't stamp on a credential you already set up for
+somewhere else.
+
+Keep `goprivate` narrow. It sets `GONOPROXY` too, so a glob wider than your real
+private modules drags perfectly public ones off the proxy and clones each of
+them from scratch, in every job, on every run. foundry names a single module for
+that reason: it pulls in twenty-two xraph modules and exactly one of them is
+private. The default is `github.com/xraph/*`, which is the safe answer when you
+do not know and the slow one when you do.
+
+Read access on the private repos is all the token needs. A fine-grained PAT
+works. So does a GitHub App installation token. The default `GITHUB_TOKEN` does
+not, and cannot: it only ever reaches the repo the workflow is running in.
+
 ## Escaping the Makefile probe
 
 `go-ci.yml` prefers a Makefile target when one matching the step exists. That
