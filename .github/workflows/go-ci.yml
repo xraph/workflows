@@ -67,8 +67,15 @@ on:
         description: 'Check that nested go.mod files require their siblings at versions the module proxy can serve. A nested module replace is ignored once the module is somebody else dependency, so a require naming an unpublished version breaks go get for every consumer while every local build keeps working. No-op in a repo with a single go.mod.'
         type: boolean
         default: true
+      goprivate:
+        description: 'GOPRIVATE glob applied when XRAPH_REPO_TOKEN is set. Narrow it to what is genuinely private - the glob also sets GONOPROXY, so a broad one drags every public module under it off the proxy and onto a full git clone per job, for nothing. Comma-separated for more than one.'
+        type: string
+        default: 'github.com/xraph/*'
     secrets:
       CODECOV_TOKEN:
+        required: false
+      XRAPH_REPO_TOKEN:
+        description: 'Read access to the private repositories in this org. Without it, private modules are never fetched and a repo that needs one fails at download.'
         required: false
 
 jobs:
@@ -128,6 +135,27 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+
+      # kgkit and any other private xraph module is not on the public proxy, and
+      # an unauthenticated fetch comes back "repository not found", which reads
+      # as a missing repo rather than a missing credential. Carry the token on
+      # the org's clone URL and take the private paths off the proxy.
+      #
+      # The rewrite is scoped to the org rather than to all of github.com, so it
+      # cannot clobber a credential a consumer has already set for somewhere
+      # else. No-op without the secret, so public-only consumers are unaffected.
+      - name: Configure Go module auth
+        shell: bash
+        env:
+          XRAPH_REPO_TOKEN: ${{ secrets.XRAPH_REPO_TOKEN }}
+          GOPRIVATE_GLOB: ${{ inputs.goprivate }}
+        run: |
+          set -euo pipefail
+          if [ -n "${XRAPH_REPO_TOKEN:-}" ]; then
+            git config --global url."https://x-access-token:${XRAPH_REPO_TOKEN}@github.com/xraph/".insteadOf "https://github.com/xraph/"
+            echo "GOPRIVATE=${GOPRIVATE_GLOB}" >> "$GITHUB_ENV"
+            echo "- private modules: \`${GOPRIVATE_GLOB}\`, fetched over the token" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Set up Go
         uses: actions/setup-go@v7
@@ -267,6 +295,27 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      # kgkit and any other private xraph module is not on the public proxy, and
+      # an unauthenticated fetch comes back "repository not found", which reads
+      # as a missing repo rather than a missing credential. Carry the token on
+      # the org's clone URL and take the private paths off the proxy.
+      #
+      # The rewrite is scoped to the org rather than to all of github.com, so it
+      # cannot clobber a credential a consumer has already set for somewhere
+      # else. No-op without the secret, so public-only consumers are unaffected.
+      - name: Configure Go module auth
+        shell: bash
+        env:
+          XRAPH_REPO_TOKEN: ${{ secrets.XRAPH_REPO_TOKEN }}
+          GOPRIVATE_GLOB: ${{ inputs.goprivate }}
+        run: |
+          set -euo pipefail
+          if [ -n "${XRAPH_REPO_TOKEN:-}" ]; then
+            git config --global url."https://x-access-token:${XRAPH_REPO_TOKEN}@github.com/xraph/".insteadOf "https://github.com/xraph/"
+            echo "GOPRIVATE=${GOPRIVATE_GLOB}" >> "$GITHUB_ENV"
+            echo "- private modules: \`${GOPRIVATE_GLOB}\`, fetched over the token" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
@@ -298,6 +347,27 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+
+      # kgkit and any other private xraph module is not on the public proxy, and
+      # an unauthenticated fetch comes back "repository not found", which reads
+      # as a missing repo rather than a missing credential. Carry the token on
+      # the org's clone URL and take the private paths off the proxy.
+      #
+      # The rewrite is scoped to the org rather than to all of github.com, so it
+      # cannot clobber a credential a consumer has already set for somewhere
+      # else. No-op without the secret, so public-only consumers are unaffected.
+      - name: Configure Go module auth
+        shell: bash
+        env:
+          XRAPH_REPO_TOKEN: ${{ secrets.XRAPH_REPO_TOKEN }}
+          GOPRIVATE_GLOB: ${{ inputs.goprivate }}
+        run: |
+          set -euo pipefail
+          if [ -n "${XRAPH_REPO_TOKEN:-}" ]; then
+            git config --global url."https://x-access-token:${XRAPH_REPO_TOKEN}@github.com/xraph/".insteadOf "https://github.com/xraph/"
+            echo "GOPRIVATE=${GOPRIVATE_GLOB}" >> "$GITHUB_ENV"
+            echo "- private modules: \`${GOPRIVATE_GLOB}\`, fetched over the token" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Set up Go
         uses: actions/setup-go@v7
@@ -365,6 +435,27 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+
+      # kgkit and any other private xraph module is not on the public proxy, and
+      # an unauthenticated fetch comes back "repository not found", which reads
+      # as a missing repo rather than a missing credential. Carry the token on
+      # the org's clone URL and take the private paths off the proxy.
+      #
+      # The rewrite is scoped to the org rather than to all of github.com, so it
+      # cannot clobber a credential a consumer has already set for somewhere
+      # else. No-op without the secret, so public-only consumers are unaffected.
+      - name: Configure Go module auth
+        shell: bash
+        env:
+          XRAPH_REPO_TOKEN: ${{ secrets.XRAPH_REPO_TOKEN }}
+          GOPRIVATE_GLOB: ${{ inputs.goprivate }}
+        run: |
+          set -euo pipefail
+          if [ -n "${XRAPH_REPO_TOKEN:-}" ]; then
+            git config --global url."https://x-access-token:${XRAPH_REPO_TOKEN}@github.com/xraph/".insteadOf "https://github.com/xraph/"
+            echo "GOPRIVATE=${GOPRIVATE_GLOB}" >> "$GITHUB_ENV"
+            echo "- private modules: \`${GOPRIVATE_GLOB}\`, fetched over the token" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Set up Go
         uses: actions/setup-go@v7
