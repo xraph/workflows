@@ -22,6 +22,10 @@ on:
       golangci-lint-version:
         type: string
         default: 'v2.12.2'
+      golangci-lint-timeout:
+        description: 'Timeout passed to golangci-lint. Raise it for a large module or one with a cold build cache - setup-go only caches the module cache, not the build cache, so a big repo can typecheck every package and dependency from scratch within this window.'
+        type: string
+        default: '5m'
       gosec-version:
         type: string
         default: 'v2.28.0'
@@ -331,7 +335,7 @@ jobs:
         with:
           version: ${{ inputs.golangci-lint-version }}
           working-directory: ${{ inputs.working-directory }}
-          args: --timeout=5m
+          args: --timeout=${{ inputs.golangci-lint-timeout }}
 
   verify:
     name: Verify
