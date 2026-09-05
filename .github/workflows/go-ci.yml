@@ -330,6 +330,22 @@ jobs:
           check-latest: true
           cache-dependency-path: ${{ inputs.working-directory }}/go.mod
 
+      # golangci-lint's package loader gets export data for every dependency
+      # by reading GOCACHE, same as a plain build. setup-go's cache only
+      # covers the module download cache, so on a fresh runner GOCACHE starts
+      # empty and lint ends up compiling everything itself, uncached, inside
+      # the timeout above. Building here fills GOCACHE for lint to reuse a
+      # moment later on the same runner, and fails fast with a plain compiler
+      # error if the module does not build at all, instead of a confusing
+      # lint timeout. Costs a few seconds on a small module; saves much more
+      # on a large one.
+      - name: Warm build cache
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          set -euo pipefail
+          go build ./...
+
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
