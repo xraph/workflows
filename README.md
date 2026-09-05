@@ -234,6 +234,28 @@ a monorepo, while its CI deliberately tests only the root module, would get a
 much broader (and slower) run than intended. Pass `prefer-makefile: false` to
 force the plain `go` commands.
 
+## Lint on a cold cache
+
+golangci-lint typechecks the whole module while it loads packages. On a big
+repo, with nothing in GOCACHE, that alone can outrun the deadline before a
+single linter runs:
+
+```
+context loading failed: failed to load packages: context deadline exceeded
+```
+
+The lint job builds the module first so GOCACHE is populated and loading reuses
+the compiled output. That step is deliberately non-fatal: a module that truly
+does not compile should be reported by golangci-lint with a file and a line, not
+as a bare build failure in a step you never asked for.
+
+If linting is still slow once the cache is warm, raise the deadline:
+
+```yaml
+with:
+  golangci-lint-timeout: '15m'
+```
+
 ## Splitting gating from non-gating
 
 `only-test: true` runs just the test matrix, skipping lint, verify and
