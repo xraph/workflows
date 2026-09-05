@@ -22,6 +22,10 @@ on:
       golangci-lint-version:
         type: string
         default: 'v2.12.2'
+      golangci-lint-timeout:
+        description: 'Timeout passed to golangci-lint. The job warms the build cache first, which is what usually blows the deadline on a large module, so raise this only if linting itself is genuinely slow.'
+        type: string
+        default: '5m'
       gosec-version:
         type: string
         default: 'v2.28.0'
@@ -326,12 +330,27 @@ jobs:
           check-latest: true
           cache-dependency-path: ${{ inputs.working-directory }}/go.mod
 
+      # Warm the build cache before linting. On a cold cache golangci-lint has to
+      # typecheck the entire module while loading packages, and on a large repo
+      # that alone blows the deadline: "context loading failed: context deadline
+      # exceeded". Building first fills GOCACHE so loading reuses the compiled
+      # output.
+      #
+      # Non-fatal on purpose. A module that genuinely does not compile should be
+      # reported by golangci-lint, with file and line, and not as a bare build
+      # failure in a step the caller never asked for.
+      - name: Warm build cache
+        continue-on-error: true
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+        run: go build ./...
+
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
           version: ${{ inputs.golangci-lint-version }}
           working-directory: ${{ inputs.working-directory }}
-          args: --timeout=5m
+          args: --timeout=${{ inputs.golangci-lint-timeout }}
 
   verify:
     name: Verify
