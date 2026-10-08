@@ -134,6 +134,56 @@ jobs:
       working-directory: testdata/fixture-rust
       skip-audit: false
 
+  smoke-node-pnpm:
+    name: 'Smoke: Node CI, pnpm workspace'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/node-ci.yml
+    with:
+      working-directory: testdata/fixture-node-pnpm
+      # The fixture's build script exits 1 unless this arrives, and it has no
+      # typecheck script, so one run covers env-vars and the skip path.
+      env-vars: |
+        FIXTURE_FLAG=on
+
+  smoke-node-npm:
+    name: 'Smoke: Node CI, npm without a lockfile'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/node-ci.yml
+    with:
+      working-directory: testdata/fixture-node-npm
+
+  smoke-npm-publish-pnpm:
+    name: 'Smoke: npm publish, pnpm workspace dry run'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/npm-publish.yml
+    with:
+      package-manager: pnpm
+      workspace-directory: testdata/fixture-node-pnpm
+      # adapter needs core at runtime and plugin peers on it, so a packed
+      # manifest with a leftover workspace: range fails this job.
+      packages: >-
+        ["testdata/fixture-node-pnpm/packages/core",
+         "testdata/fixture-node-pnpm/packages/adapter",
+         "testdata/fixture-node-pnpm/packages/plugin"]
+      version: '1.2.3'
+      build-script: ''
+      skip-existing: true
+      dry-run: true
+
+  smoke-npm-publish-npm:
+    name: 'Smoke: npm publish, single package dry run'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/npm-publish.yml
+    with:
+      packages: '["testdata/fixture-node-npm"]'
+      version: '1.2.3'
+      build-script: ''
+      dry-run: true
+
   # A single stable check for branch protection to require.
   #
   # Requiring the individual jobs does not work here: their check names carry
@@ -159,6 +209,10 @@ jobs:
       - smoke-go-node
       - smoke-rust-make
       - smoke-rust
+      - smoke-node-pnpm
+      - smoke-node-npm
+      - smoke-npm-publish-pnpm
+      - smoke-npm-publish-npm
     runs-on: ubuntu-latest
     steps:
       - name: Check every gating job succeeded

@@ -1,0 +1,12 @@
+{
+  "name": "@xraph-fixture/adapter",
+  "version": "0.0.0",
+  "main": "index.js",
+  "files": ["index.js"],
+  "scripts": {
+    "test": "node -e \"if (require('./index.js').core !== 'core') process.exit(1)\""
+  },
+  "dependencies": {
+    "@xraph-fixture/core": "workspace:*"
+  }
+}

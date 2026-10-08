@@ -39,6 +39,8 @@ jobs:
 | `go-binary-release.yml` | GoReleaser cross-platform binaries |
 | `codeql.yml` | CodeQL analysis for Go |
 | `rust-ci.yml` | lint, security audit, build + test for Rust |
+| `node-ci.yml` | one install, then the repo's own typecheck, lint, test and build scripts |
+| `npm-publish.yml` | ordered npm publishing, with a pnpm workspace mode |
 | `semantic-release.yml` | conventional-commit versioning and GitHub releases |
 
 ## Pinned tool versions
@@ -339,3 +341,51 @@ Rust crates frequently need native build dependencies. Pass them with
 `dist-workspace.toml`, and `farp-rust` is released by `farp`'s semantic-release
 because its version is `farp`'s version. Both work; neither should be replaced
 by a shared workflow.
+
+## Node track
+
+`node-ci.yml` installs your project once and runs the root package.json scripts
+you list, in order. The default list is typecheck, lint, test and build. A
+script your manifest doesn't define is skipped, and the job summary says so,
+which lets one call serve a turbo monorepo and a single package with plain tsc.
+If none of the listed scripts exist the job fails, because a green run that ran
+nothing is nearly always a typo or the wrong `working-directory`.
+
+The lockfile picks the package manager. `pnpm-lock.yaml` means pnpm, at the
+version in your `packageManager` field. Anything else means npm: `npm ci` with a
+`package-lock.json`, `npm install` without one.
+
+```yaml
+jobs:
+  ci:
+    uses: xraph/workflows/.github/workflows/node-ci.yml@v1
+    with:
+      scripts: '["typecheck","lint","test:ci","build"]'
+      env-vars: |
+        FORGE_DASHBOARD_URL=http://localhost:7901/dashboard
+```
+
+`env-vars` takes one `KEY=value` per line and gives it to every script. It ends
+up in the job log, so keep secrets out of it.
+
+### Publishing a pnpm workspace
+
+By default `npm-publish.yml` installs each package with plain npm, and plain npm
+can't resolve `workspace:*`. Set `package-manager: pnpm` and the workflow
+installs the workspace once, stamps `version` on every listed package before it
+packs any of them, and packs with pnpm. pnpm turns `workspace:*` into the
+release version and `workspace:^` into a caret range on it, so give internal
+peer dependencies `workspace:^` and they follow every release. Each tarball is
+checked for a leftover `workspace:` range before `npm publish` sees it.
+
+The workflow also refuses a list that leaves out a package another one needs. A
+runtime, peer or optional dependency on an unlisted workspace package would pack
+as a version nobody ever publishes. devDependencies don't count, since consumers
+never install them.
+
+`skip-existing: true` skips any `name@version` the registry already has, so you
+can re-run a release that died half way through a long list. It's off by
+default because it hides a forgotten version bump just as quietly.
+
+`examples/node-library` has a CI caller and a tag-driven release that publishes
+a pnpm workspace.
