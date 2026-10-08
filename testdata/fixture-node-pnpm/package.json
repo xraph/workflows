@@ -1,0 +1,10 @@
+{
+  "name": "fixture-node-pnpm",
+  "private": true,
+  "packageManager": "pnpm@10.21.0",
+  "scripts": {
+    "lint": "node -e \"process.exit(0)\"",
+    "test": "pnpm -r run test",
+    "build": "node -e \"if (process.env.FIXTURE_FLAG !== 'on') { console.error('FIXTURE_FLAG did not reach the script'); process.exit(1) }\""
+  }
+}

@@ -1,0 +1,16 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    uses: xraph/workflows/.github/workflows/node-ci.yml@v1
+    # Runs typecheck, lint, test and build from the root package.json, skipping
+    # any the manifest doesn't define. Pass `scripts` to change the list.

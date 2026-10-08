@@ -1,0 +1,161 @@
+name: Node CI
+
+# Installs a Node project once and runs its own package.json scripts in order.
+#
+# The scripts are the repo's, not this workflow's. A script named in `scripts`
+# that the root package.json does not define is skipped and noted in the job
+# summary, the same way rust-ci.yml falls back when a Makefile target is
+# missing, so one default list serves a monorepo with turbo and a single
+# package with plain tsc alike.
+#
+# The package manager comes from the lockfile: pnpm-lock.yaml means pnpm,
+# anything else means npm. pnpm's version comes from the "packageManager" field
+# in package.json unless `pnpm-version` overrides it, so CI runs the pnpm the
+# lockfile was written with.
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: 'Directory holding the root package.json (and the lockfile).'
+        type: string
+        default: '.'
+      node-version:
+        description: >-
+          Node major. 24 by default, matching npm-publish.yml: npm 10 (Node 20
+          and 22) mishandles lockfiles carrying a nested esbuild.
+        type: string
+        default: '24'
+      pnpm-version:
+        description: >-
+          pnpm version, for a repo without a "packageManager" field. Leave it
+          empty when the field exists: pnpm/action-setup refuses to run when the
+          two are both set and disagree.
+        type: string
+        default: ''
+      scripts:
+        description: >-
+          JSON array of root package.json scripts to run, in order. A script the
+          manifest does not define is skipped, not failed.
+        type: string
+        default: '["typecheck","lint","test","build"]'
+      env-vars:
+        description: >-
+          Extra environment for every script, one KEY=value per line. For values
+          a build needs at compile time, e.g. FORGE_DASHBOARD_URL=http://localhost:7901.
+          Not for secrets: these land in the job log.
+        type: string
+        default: ''
+
+jobs:
+  check:
+    name: Check (node ${{ inputs.node-version }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Detect package manager
+        id: pm
+        run: |
+          set -euo pipefail
+          if [ ! -f package.json ]; then
+            echo "::error::no package.json in ${PWD}"
+            exit 1
+          fi
+          if [ -f pnpm-lock.yaml ]; then
+            echo 'name=pnpm' >> "$GITHUB_OUTPUT"
+            echo 'lockfile=pnpm-lock.yaml' >> "$GITHUB_OUTPUT"
+          elif [ -f package-lock.json ]; then
+            echo 'name=npm' >> "$GITHUB_OUTPUT"
+            echo 'lockfile=package-lock.json' >> "$GITHUB_OUTPUT"
+          else
+            echo 'name=npm' >> "$GITHUB_OUTPUT"
+            echo 'lockfile=' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up pnpm
+        if: steps.pm.outputs.name == 'pnpm'
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ inputs.pnpm-version }}
+          package_json_file: ${{ inputs.working-directory }}/package.json
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ inputs.node-version }}
+          # Caching needs a lockfile to key on. Without one there is nothing
+          # stable to cache against, so leave it off.
+          cache: ${{ steps.pm.outputs.lockfile != '' && steps.pm.outputs.name || '' }}
+          cache-dependency-path: ${{ steps.pm.outputs.lockfile != '' && format('{0}/{1}', inputs.working-directory, steps.pm.outputs.lockfile) || '' }}
+
+      - name: Export env-vars
+        env:
+          ENV_VARS: ${{ inputs.env-vars }}
+        run: |
+          set -euo pipefail
+          # Each line is checked before it reaches GITHUB_ENV. A line that is
+          # not KEY=value could otherwise smuggle a second variable in through
+          # an embedded delimiter.
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            if ! printf '%s' "$line" | grep -Eq '^[A-Za-z_][A-Za-z0-9_]*='; then
+              echo "::error::env-vars line is not KEY=value: $line"
+              exit 1
+            fi
+            printf '%s\n' "$line" >> "$GITHUB_ENV"
+            echo "- env: \`${line%%=*}\`" >> "$GITHUB_STEP_SUMMARY"
+          done <<< "$ENV_VARS"
+
+      - name: Install dependencies
+        env:
+          PM: ${{ steps.pm.outputs.name }}
+          LOCKFILE: ${{ steps.pm.outputs.lockfile }}
+        run: |
+          set -euo pipefail
+          if [ "$PM" = pnpm ]; then
+            pnpm install --frozen-lockfile
+          elif [ -n "$LOCKFILE" ]; then
+            npm ci
+          else
+            npm install
+          fi
+          printf -- '- install: %s%s\n' "$PM" "${LOCKFILE:+ (from $LOCKFILE)}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Run scripts
+        env:
+          PM: ${{ steps.pm.outputs.name }}
+          SCRIPTS: ${{ inputs.scripts }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$SCRIPTS" | jq -e 'type == "array"' >/dev/null; then
+            echo "::error::scripts must be a JSON array of script names"
+            exit 1
+          fi
+
+          ran=0
+          while read -r script; do
+            if jq -e --arg s "$script" '.scripts[$s] // empty' package.json >/dev/null; then
+              echo "::group::$PM run $script"
+              "$PM" run "$script"
+              echo "::endgroup::"
+              printf -- '- %s: ran\n' "$script" >> "$GITHUB_STEP_SUMMARY"
+              ran=$((ran + 1))
+            else
+              printf -- '- %s: skipped, not in package.json\n' "$script" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done < <(printf '%s' "$SCRIPTS" | jq -r '.[]')
+
+          # A green run that ran nothing is almost always a typo in `scripts`
+          # or the wrong working-directory, so say so loudly.
+          if [ "$ran" -eq 0 ]; then
+            echo "::error::none of the requested scripts exist in package.json"
+            exit 1
+          fi

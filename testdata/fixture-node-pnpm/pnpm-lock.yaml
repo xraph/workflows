@@ -1,0 +1,23 @@
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .: {}
+
+  packages/adapter:
+    dependencies:
+      '@xraph-fixture/core':
+        specifier: workspace:*
+        version: link:../core
+
+  packages/core: {}
+
+  packages/plugin:
+    devDependencies:
+      '@xraph-fixture/core':
+        specifier: workspace:*
+        version: link:../core

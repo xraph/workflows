@@ -1,0 +1,9 @@
+{
+  "name": "@xraph-fixture/core",
+  "version": "0.0.0",
+  "main": "index.js",
+  "files": ["index.js"],
+  "scripts": {
+    "test": "node -e \"require('./index.js')\""
+  }
+}

@@ -8,6 +8,14 @@ name: NPM Publish
 # the core first, and the adapters must build against the core's freshly built
 # dist rather than against whatever the registry last served. One job with an
 # ordered list gives both; a matrix gives neither.
+#
+# `package-manager: pnpm` is for pnpm workspaces, where packages point at each
+# other with `workspace:*`. Plain npm cannot resolve that protocol and fails in
+# `npm install` before anything is published. In pnpm mode the workspace is
+# installed once, every listed package gets its version before any of them is
+# packed, and `pnpm pack` turns each `workspace:` range into the real version.
+# The tarball is checked for a leftover `workspace:` range and then handed to
+# `npm publish`, so what reaches the registry is exactly what was checked.
 
 on:
   workflow_call:
@@ -56,6 +64,25 @@ on:
       registry-url:
         type: string
         default: 'https://registry.npmjs.org'
+      package-manager:
+        description: >-
+          npm or pnpm. npm installs and builds each package on its own. pnpm
+          installs the workspace at `workspace-directory` once and packs with
+          pnpm, which rewrites `workspace:` ranges. See the header.
+        type: string
+        default: 'npm'
+      workspace-directory:
+        description: 'pnpm mode only: the workspace root holding pnpm-lock.yaml. `packages` stay relative to the repository root.'
+        type: string
+        default: '.'
+      skip-existing:
+        description: >-
+          Skip a package whose name@version is already on the registry instead
+          of failing on it. Lets a re-run finish a release that died half way
+          through the list. Off by default, because with it on a forgotten
+          version bump passes silently.
+        type: boolean
+        default: false
     secrets:
       NPM_TOKEN:
         description: 'Automation token with publish rights. Not required for a dry run.'
@@ -77,6 +104,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Set up pnpm
+        if: inputs.package-manager == 'pnpm'
+        uses: pnpm/action-setup@v4
+        with:
+          package_json_file: ${{ inputs.workspace-directory }}/package.json
+
       - name: Set up Node
         uses: actions/setup-node@v7
         with:
@@ -88,8 +121,17 @@ jobs:
         env:
           PACKAGES: ${{ inputs.packages }}
           VERSION: ${{ inputs.version }}
+          PM: ${{ inputs.package-manager }}
         run: |
           set -euo pipefail
+
+          case "$PM" in
+            npm|pnpm) ;;
+            *)
+              echo "::error::package-manager must be npm or pnpm, got '$PM'"
+              exit 1
+              ;;
+          esac
 
           # Fail on a malformed list here rather than half way through a publish
           # loop, where the packages before the bad entry are already public.
@@ -122,6 +164,48 @@ jobs:
             exit 1
           fi
 
+      - name: Prepare pnpm workspace
+        if: inputs.package-manager == 'pnpm'
+        shell: bash
+        env:
+          PACKAGES: ${{ inputs.packages }}
+          VERSION: ${{ inputs.version }}
+          WORKSPACE: ${{ inputs.workspace-directory }}
+        run: |
+          set -euo pipefail
+
+          (cd "$WORKSPACE" && pnpm install --frozen-lockfile)
+
+          # A runtime dependency on a workspace package that is not in the list
+          # packs as a pinned version nobody ever publishes, and every install
+          # of the dependent package then fails. devDependencies are exempt:
+          # consumers never install them.
+          listed=$(while read -r dir; do jq -r .name "$dir/package.json"; done < <(printf '%s' "$PACKAGES" | jq -r '.[]') | jq -R . | jq -sc .)
+          while read -r dir; do
+            missing=$(jq -r --argjson listed "$listed" '
+              [.dependencies, .peerDependencies, .optionalDependencies]
+              | map(select(. != null) | to_entries[])
+              | map(select((.value | tostring | startswith("workspace:")) and ((.key as $k | any($listed[]; . == $k)) | not)) | .key)
+              | join(", ")' "$dir/package.json")
+            if [ -n "$missing" ]; then
+              echo "::error::$dir depends on workspace package(s) that are not being published: $missing"
+              exit 1
+            fi
+          done < <(printf '%s' "$PACKAGES" | jq -r '.[]')
+
+          # Every version is stamped before anything is packed. pnpm resolves a
+          # `workspace:` range from the target package's package.json at pack
+          # time, so stamping inside the publish loop would pin early packages
+          # to the old version of the ones that come later.
+          if [ -n "$VERSION" ]; then
+            while read -r dir; do
+              tmp=$(mktemp)
+              jq --arg v "$VERSION" '.version = $v' "$dir/package.json" > "$tmp"
+              cat "$tmp" > "$dir/package.json"
+              rm -f "$tmp"
+            done < <(printf '%s' "$PACKAGES" | jq -r '.[]')
+          fi
+
       - name: Publish
         id: publish
         shell: bash
@@ -131,41 +215,82 @@ jobs:
           DRY_RUN: ${{ inputs.dry-run }}
           ACCESS: ${{ inputs.access }}
           BUILD_SCRIPT: ${{ inputs.build-script }}
+          PM: ${{ inputs.package-manager }}
+          SKIP_EXISTING: ${{ inputs.skip-existing }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
 
           PUBLISHED='[]'
+          PACK_ROOT="$RUNNER_TEMP/npm-publish-pack"
 
           while read -r dir; do
             name=$(jq -r .name "$dir/package.json")
             echo "::group::$name ($dir)"
             pushd "$dir" >/dev/null
 
-            # `npm ci` when a lockfile is committed, `npm install` otherwise.
-            # `ci` is the stricter of the two and additionally fails when the
-            # lockfile and package.json disagree, so prefer it whenever it can
-            # run at all.
-            if [ -f package-lock.json ]; then npm ci; else npm install; fi
+            if [ "$PM" = pnpm ]; then
+              # Installed and stamped once, in the step above.
+              if [ -n "$BUILD_SCRIPT" ]; then
+                pnpm run "$BUILD_SCRIPT"
+              fi
+            else
+              # `npm ci` when a lockfile is committed, `npm install` otherwise.
+              # `ci` is the stricter of the two and additionally fails when the
+              # lockfile and package.json disagree, so prefer it whenever it can
+              # run at all.
+              if [ -f package-lock.json ]; then npm ci; else npm install; fi
 
-            if [ -n "$BUILD_SCRIPT" ]; then
-              npm run "$BUILD_SCRIPT"
-            fi
+              if [ -n "$BUILD_SCRIPT" ]; then
+                npm run "$BUILD_SCRIPT"
+              fi
 
-            # --no-git-tag-version: the caller's tag is the source of truth and
-            # this workspace is thrown away. Committing or tagging here would
-            # push a second tag for the release that triggered the run.
-            if [ -n "$VERSION" ]; then
-              npm version "$VERSION" --no-git-tag-version --allow-same-version
+              # --no-git-tag-version: the caller's tag is the source of truth and
+              # this workspace is thrown away. Committing or tagging here would
+              # push a second tag for the release that triggered the run.
+              if [ -n "$VERSION" ]; then
+                npm version "$VERSION" --no-git-tag-version --allow-same-version
+              fi
             fi
 
             published_version=$(jq -r .version package.json)
 
+            if [ "$SKIP_EXISTING" = "true" ] && npm view "$name@$published_version" version >/dev/null 2>&1; then
+              echo "$name@$published_version is already on the registry, skipping"
+              popd >/dev/null
+              echo "::endgroup::"
+              continue
+            fi
+
+            # npm mode publishes the directory. pnpm mode publishes the tarball
+            # pnpm packed, after checking that no `workspace:` range survived.
+            target=.
+            if [ "$PM" = pnpm ]; then
+              dest="$PACK_ROOT/$(printf '%s' "$name" | tr '@/' '__')"
+              rm -rf "$dest"
+              mkdir -p "$dest"
+              pnpm pack --pack-destination "$dest" >/dev/null
+              target=$(find "$dest" -maxdepth 1 -name '*.tgz' -print -quit)
+              if [ -z "$target" ]; then
+                echo "::error::pnpm pack produced no tarball for $name"
+                exit 1
+              fi
+              leaked=$(tar -xOzf "$target" package/package.json | jq -r '
+                [.dependencies, .peerDependencies, .optionalDependencies, .devDependencies]
+                | map(select(. != null) | to_entries[])
+                | map(select(.value | tostring | startswith("workspace:")) | .key)
+                | join(", ")')
+              if [ -n "$leaked" ]; then
+                echo "::error::$name packed with workspace: ranges still in it: $leaked"
+                exit 1
+              fi
+            fi
+
             if [ "$DRY_RUN" = "true" ]; then
-              npm publish --dry-run --access "$ACCESS"
+              npm publish "$target" --dry-run --access "$ACCESS"
               echo "would publish $name@$published_version"
             else
-              npm publish --access "$ACCESS"
+              npm publish "$target" --access "$ACCESS"
               PUBLISHED=$(printf '%s' "$PUBLISHED" | jq -c --arg e "$name@$published_version" '. + [$e]')
             fi
 
