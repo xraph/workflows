@@ -146,6 +146,23 @@ Opt-in, all defaulting off, so a Homebrew-only consumer is unaffected:
   GoReleaser pushes to a tap or bucket in another repo — it falls back to
   `GITHUB_TOKEN`), `FURY_TOKEN` (Gemfury, for `nfpms` deb/rpm), and `AUR_KEY`.
 
+### A frontend in the archive
+
+When a `before` hook builds a web app that ships inside an archive, the runner
+needs Node, and often pnpm. Set `node-version` to install Node. Set
+`pnpm-directory` to the directory whose `package.json` names pnpm in its
+`packageManager` field, and that pnpm is installed with its store cached:
+
+```yaml
+with:
+  node-version: '24'
+  pnpm-directory: apps/dashboard
+```
+
+`ref` checks out something other than the ref that started the run. A manual
+run that re-publishes an existing release passes the tag here, so GoReleaser
+finds it at HEAD.
+
 `forge` is the first consumer. `forgeui` and `smart-form` also carry a
 `.goreleaser.yml` and are the obvious next ones.
 

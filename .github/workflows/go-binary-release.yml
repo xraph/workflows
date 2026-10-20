@@ -27,6 +27,18 @@ on:
       working-directory:
         type: string
         default: '.'
+      ref:
+        description: 'Ref to check out, usually a release tag. Empty means the ref that started the run. Set it when a manual run re-publishes a tag that already exists, so GoReleaser finds the tag at HEAD.'
+        type: string
+        default: ''
+      node-version:
+        description: 'Set up this Node version before GoReleaser runs. Empty skips Node. Needed when a before hook builds a frontend that ships inside an archive.'
+        type: string
+        default: ''
+      pnpm-directory:
+        description: 'Directory, from the repository root, holding a package.json whose "packageManager" field names a pnpm version. Set it to install that pnpm and cache its store. Needs node-version.'
+        type: string
+        default: ''
     secrets:
       HOMEBREW_TAP_TOKEN:
         required: false
@@ -72,7 +84,30 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
         with:
+          ref: ${{ inputs.ref }}
           fetch-depth: 0
+
+      - name: Check the Node inputs
+        if: inputs.pnpm-directory != '' && inputs.node-version == ''
+        shell: bash
+        run: |
+          echo "::error::pnpm-directory needs node-version: pnpm cannot run without Node."
+          exit 1
+
+      # pnpm goes on the PATH first so setup-node can cache its store.
+      - name: Set up pnpm
+        if: inputs.pnpm-directory != ''
+        uses: pnpm/action-setup@v4
+        with:
+          package_json_file: ${{ inputs.pnpm-directory }}/package.json
+
+      - name: Set up Node
+        if: inputs.node-version != ''
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: ${{ inputs.pnpm-directory != '' && 'pnpm' || '' }}
+          cache-dependency-path: ${{ inputs.pnpm-directory != '' && format('{0}/pnpm-lock.yaml', inputs.pnpm-directory) || '' }}
 
       - name: Set up Go
         uses: actions/setup-go@v7
