@@ -1,6 +1,11 @@
 {
   "name": "@xraph-fixture/plugin",
   "version": "0.0.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xraph/workflows.git",
+    "directory": "testdata/fixture-node-pnpm/packages/plugin"
+  },
   "main": "index.js",
   "files": ["index.js"],
   "scripts": {

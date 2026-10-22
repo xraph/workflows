@@ -110,6 +110,10 @@ permissions its jobs actually need.
 - `semantic-release.yml` needs `contents: write`, `issues: write` and
   `pull-requests: write`. Only the first is fatal if omitted; the other two
   degrade to a logged warning and skipped issue/PR comments.
+- `npm-publish.yml` needs `contents: read`, plus `id-token: write` when you set
+  `provenance: true`. It's the one reusable workflow here whose job declares no
+  permissions of its own, so it runs with exactly what you grant. Ask for
+  provenance without `id-token: write` and it stops before publishing anything.
 
 GitHub validates the permissions of **every** nested job in a locally-called
 reusable workflow at parse time, including jobs skipped by `if:`. An under-grant
@@ -404,5 +408,53 @@ never install them.
 can re-run a release that died half way through a long list. It's off by
 default because it hides a forgotten version bump just as quietly.
 
+### Pre-releases and provenance
+
+Two inputs cover a release that isn't a plain stable publish.
+
+```yaml
+jobs:
+  publish:
+    permissions:
+      contents: read
+      id-token: write   # only needed for provenance
+    uses: xraph/workflows/.github/workflows/npm-publish.yml@v1
+    with:
+      packages: '["packages/core","packages/react"]'
+      version: ${{ needs.prepare.outputs.version }}
+      dist-tag: ${{ needs.prepare.outputs.dist-tag }}
+      provenance: true
+      dry-run: false
+    secrets:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+```
+
+`dist-tag` is passed to every `npm publish` as `--tag`, dry runs included. Leave
+it empty and npm uses `latest`, as before. You'll want `next` for anything with
+a pre-release suffix, so `npm install your-package` doesn't hand people an
+`-rc.1`. npm 11 actually refuses to publish a pre-release without a tag, so
+this isn't optional once you cut one. The workflow won't pick the tag for you.
+Work it out in a prepare job from the version you already have:
+
+```bash
+case "${version%%+*}" in        # drop +build metadata first
+  *-*) echo "dist_tag=next"   >> "$GITHUB_OUTPUT" ;;
+  *)   echo "dist_tag=latest" >> "$GITHUB_OUTPUT" ;;
+esac
+```
+
+A tag may hold letters, digits, `.`, `_` and `-`. Anything npm could read as a
+version or range (`1.2`, `v2`, `x`) is rejected up front, because npm would
+reject it too, only later.
+
+`provenance: true` publishes with `--provenance`, so npm shows which commit and
+workflow run built each version. The calling job has to grant `id-token: write`:
+a reusable workflow can't widen its caller's token, and npm needs that token to
+sign. Every package.json also needs a `repository` field pointing at the repo
+running the release, since the registry turns a provenance publish down when
+they don't match. Both are checked before the first package goes out. A
+half-published release, where the packages ahead of the bad one are already
+public, is the outcome this avoids.
+
 `examples/node-library` has a CI caller and a tag-driven release that publishes
-a pnpm workspace.
+a pnpm workspace, with `next` for pre-release tags and provenance on.

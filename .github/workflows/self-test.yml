@@ -184,6 +184,32 @@ jobs:
       build-script: ''
       dry-run: true
 
+  smoke-npm-publish-prerelease:
+    name: 'Smoke: npm publish, pre-release with provenance dry run'
+    # id-token: write is what provenance: true requires of a caller, and the
+    # workflow fails fast without it, so this job also proves the grant reaches
+    # the called job. A pull request from a fork never gets id-token, so this
+    # job fails there by design.
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/npm-publish.yml
+    with:
+      package-manager: pnpm
+      workspace-directory: testdata/fixture-node-pnpm
+      packages: >-
+        ["testdata/fixture-node-pnpm/packages/core",
+         "testdata/fixture-node-pnpm/packages/adapter",
+         "testdata/fixture-node-pnpm/packages/plugin"]
+      # npm 11 refuses even a dry run of a pre-release without --tag, so this
+      # job only passes if dist-tag reaches npm publish.
+      version: '1.2.3-rc.1'
+      dist-tag: next
+      # The fixture manifests carry a repository field for this.
+      provenance: true
+      build-script: ''
+      dry-run: true
+
   # A single stable check for branch protection to require.
   #
   # Requiring the individual jobs does not work here: their check names carry
@@ -213,6 +239,7 @@ jobs:
       - smoke-node-npm
       - smoke-npm-publish-pnpm
       - smoke-npm-publish-npm
+      - smoke-npm-publish-prerelease
     runs-on: ubuntu-latest
     steps:
       - name: Check every gating job succeeded

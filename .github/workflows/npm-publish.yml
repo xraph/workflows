@@ -16,6 +16,13 @@ name: NPM Publish
 # packed, and `pnpm pack` turns each `workspace:` range into the real version.
 # The tarball is checked for a leftover `workspace:` range and then handed to
 # `npm publish`, so what reaches the registry is exactly what was checked.
+#
+# The publish job declares no `permissions` of its own, on purpose. Inside a
+# reusable workflow a job-level block is a ceiling the caller must meet, so
+# listing `id-token: write` there would fail every existing caller that only
+# grants `contents: read`, provenance or not. Without a block the job runs with
+# exactly what the caller grants: `contents: read`, plus `id-token: write` when
+# it sets `provenance: true`.
 
 on:
   workflow_call:
@@ -83,6 +90,24 @@ on:
           version bump passes silently.
         type: boolean
         default: false
+      dist-tag:
+        description: >-
+          npm dist-tag to publish under, e.g. next for a pre-release. Empty
+          leaves it to npm, which means latest. npm 11 refuses to publish a
+          pre-release version without one, so a caller cutting 1.2.0-rc.1 must
+          set this. Letters, digits, `.`, `_` and `-` only, and nothing npm
+          could read as a version or range (1.2, v2, x).
+        type: string
+        default: ''
+      provenance:
+        description: >-
+          Publish with npm provenance, which links each package version to the
+          commit and workflow run that built it. The caller must grant
+          `id-token: write` (with `contents: read`) to the job that calls this
+          workflow, and every package.json needs a `repository` pointing at the
+          calling repository; both are checked before anything is published.
+        type: boolean
+        default: false
     secrets:
       NPM_TOKEN:
         description: 'Automation token with publish rights. Not required for a dry run.'
@@ -96,8 +121,7 @@ jobs:
   publish:
     name: Publish
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
+    # No permissions block: see the header.
     outputs:
       published: ${{ steps.publish.outputs.published }}
     steps:
@@ -122,6 +146,8 @@ jobs:
           PACKAGES: ${{ inputs.packages }}
           VERSION: ${{ inputs.version }}
           PM: ${{ inputs.package-manager }}
+          DIST_TAG: ${{ inputs.dist-tag }}
+          PROVENANCE: ${{ inputs.provenance }}
         run: |
           set -euo pipefail
 
@@ -150,6 +176,51 @@ jobs:
           if [ -n "$VERSION" ] && ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-+].+)?$'; then
             echo "::error::version must be semver without a leading v, got '$VERSION'"
             exit 1
+          fi
+
+          # npm rejects a tag it could parse as a semver range, because
+          # `npm install pkg@<tag>` would then be ambiguous. This is stricter
+          # than npm (any leading digit, after an optional v), which costs
+          # nothing and keeps the rule easy to state.
+          if [ -n "$DIST_TAG" ]; then
+            if ! printf '%s' "$DIST_TAG" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$'; then
+              echo "::error::dist-tag must start with a letter or digit and contain only letters, digits, '.', '_' and '-', got '$DIST_TAG'"
+              exit 1
+            fi
+            if printf '%s' "$DIST_TAG" | grep -Eq '^([vV]?[0-9]|[xX*]$)'; then
+              echo "::error::dist-tag must not look like a version or range, got '$DIST_TAG'. Use a name such as next or beta."
+              exit 1
+            fi
+          fi
+
+          if [ "$PROVENANCE" = "true" ]; then
+            # The runner only sets this when the job may mint an OIDC token.
+            # Checked here, and on a dry run too, because npm would otherwise
+            # fail on the first real publish with a far less obvious error.
+            if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+              echo "::error::provenance is true but the job has no id-token: write permission. Grant id-token: write (and contents: read) to the job that calls this workflow."
+              exit 1
+            fi
+
+            # The registry rejects a provenance publish whose repository field
+            # does not name the repository that built it. Catch that before the
+            # loop, where the packages ahead of the bad one are already public.
+            want=$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')
+            while read -r dir; do
+              repo=$(jq -r '.repository | if type == "object" then .url else . end // empty' "$dir/package.json" \
+                | tr '[:upper:]' '[:lower:]' | sed -E 's#^git\+##; s#/+$##; s#\.git$##')
+              case "$repo" in
+                "$want"|"github:$want"|*"github.com/$want"|*"github.com:$want") ;;
+                "")
+                  echo "::error::provenance needs a repository field in $dir/package.json, e.g. \"repository\": {\"type\": \"git\", \"url\": \"git+https://github.com/$GITHUB_REPOSITORY.git\"}"
+                  exit 1
+                  ;;
+                *)
+                  echo "::error::$dir/package.json repository is '$repo', but provenance requires it to point at github.com/$GITHUB_REPOSITORY"
+                  exit 1
+                  ;;
+              esac
+            done < <(printf '%s' "$PACKAGES" | jq -r '.[]')
           fi
 
       - name: Require a token for a real publish
@@ -217,12 +288,24 @@ jobs:
           BUILD_SCRIPT: ${{ inputs.build-script }}
           PM: ${{ inputs.package-manager }}
           SKIP_EXISTING: ${{ inputs.skip-existing }}
+          DIST_TAG: ${{ inputs.dist-tag }}
+          PROVENANCE: ${{ inputs.provenance }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
 
           PUBLISHED='[]'
           PACK_ROOT="$RUNNER_TEMP/npm-publish-pack"
+
+          # Shared by the dry run and the real publish, so the rehearsal passes
+          # npm exactly the flags the release will.
+          publish_args=(--access "$ACCESS")
+          if [ -n "$DIST_TAG" ]; then
+            publish_args+=(--tag "$DIST_TAG")
+          fi
+          if [ "$PROVENANCE" = "true" ]; then
+            publish_args+=(--provenance)
+          fi
 
           while read -r dir; do
             name=$(jq -r .name "$dir/package.json")
@@ -287,10 +370,10 @@ jobs:
             fi
 
             if [ "$DRY_RUN" = "true" ]; then
-              npm publish "$target" --dry-run --access "$ACCESS"
-              echo "would publish $name@$published_version"
+              npm publish "$target" --dry-run "${publish_args[@]}"
+              echo "would publish $name@$published_version${DIST_TAG:+ under dist-tag $DIST_TAG}"
             else
-              npm publish "$target" --access "$ACCESS"
+              npm publish "$target" "${publish_args[@]}"
               PUBLISHED=$(printf '%s' "$PUBLISHED" | jq -c --arg e "$name@$published_version" '. + [$e]')
             fi
 
@@ -305,12 +388,13 @@ jobs:
         shell: bash
         env:
           DRY_RUN: ${{ inputs.dry-run }}
+          DIST_TAG: ${{ inputs.dist-tag }}
           PUBLISHED: ${{ steps.publish.outputs.published }}
         run: |
           set -euo pipefail
           if [ "$DRY_RUN" = "true" ]; then
             echo "Dry run - nothing was published." >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "Published:" >> "$GITHUB_STEP_SUMMARY"
+            echo "Published under dist-tag \`${DIST_TAG:-latest}\`:" >> "$GITHUB_STEP_SUMMARY"
             printf '%s' "${PUBLISHED:-[]}" | jq -r '.[] | "- `\(.)`"' >> "$GITHUB_STEP_SUMMARY"
           fi

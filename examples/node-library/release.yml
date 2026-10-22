@@ -3,10 +3,14 @@ name: Release
 # Push a vX.Y.Z tag and every package below goes to npm at X.Y.Z, after CI
 # passes on the tagged commit. Dispatch it by hand to rehearse: dry-run is on
 # unless you switch it off.
+#
+# A tag with a pre-release suffix, like v1.3.0-rc.1, publishes under the next
+# dist-tag, so `npm install` keeps resolving the last stable release. Anything
+# else goes to latest. Every version also gets an npm provenance attestation.
 
 on:
   push:
-    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+    tags: ['v[0-9]+.[0-9]+.[0-9]+', 'v[0-9]+.[0-9]+.[0-9]+-*']
   workflow_dispatch:
     inputs:
       dry-run:
@@ -25,12 +29,14 @@ jobs:
     uses: xraph/workflows/.github/workflows/node-ci.yml@v1
 
   # The expression language has no string replace, and npm-publish.yml refuses
-  # a version with a leading v, so the tag is trimmed here.
+  # a version with a leading v, so the tag is trimmed here. The dist-tag is
+  # picked here too: npm 11 won't publish a pre-release without one.
   prepare:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.resolve.outputs.version }}
       dry-run: ${{ steps.resolve.outputs.dry_run }}
+      dist-tag: ${{ steps.resolve.outputs.dist_tag }}
     steps:
       - id: resolve
         shell: bash
@@ -42,15 +48,28 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$EVENT" = push ]; then
-            echo "version=${REF_NAME#v}" >> "$GITHUB_OUTPUT"
+            version="${REF_NAME#v}"
             echo "dry_run=false" >> "$GITHUB_OUTPUT"
           else
-            echo "version=${INPUT_VERSION#v}" >> "$GITHUB_OUTPUT"
+            version="${INPUT_VERSION#v}"
             echo "dry_run=${INPUT_DRY_RUN:-true}" >> "$GITHUB_OUTPUT"
           fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+          # A '-' before any '+build' metadata marks a pre-release in semver.
+          # Build metadata is cut first so 1.2.3+build-7 still counts as stable.
+          case "${version%%+*}" in
+            *-*) echo "dist_tag=next" >> "$GITHUB_OUTPUT" ;;
+            *)   echo "dist_tag=latest" >> "$GITHUB_OUTPUT" ;;
+          esac
 
   publish:
     needs: [ci, prepare]
+    # Provenance mints an OIDC token, and a called workflow only gets the
+    # permissions its caller grants, so id-token: write has to be granted here.
+    permissions:
+      contents: read
+      id-token: write
     uses: xraph/workflows/.github/workflows/npm-publish.yml@v1
     with:
       package-manager: pnpm
@@ -59,6 +78,9 @@ jobs:
       packages: '["packages/core","packages/react"]'
       version: ${{ needs.prepare.outputs.version }}
       dry-run: ${{ needs.prepare.outputs.dry-run == 'true' }}
+      dist-tag: ${{ needs.prepare.outputs.dist-tag }}
+      # Each package.json needs a repository field naming this repository.
+      provenance: true
       build-script: build
       skip-existing: true
     secrets:
