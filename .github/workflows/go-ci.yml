@@ -275,6 +275,7 @@ jobs:
             echo 'present=true' >> "$GITHUB_OUTPUT"
           else
             echo 'present=false' >> "$GITHUB_OUTPUT"
+            echo "::warning title=Coverage not uploaded::CODECOV_TOKEN was not passed to go-ci.yml. Pass it in the calling job's secrets block, or set coverage: false if this job should not upload."
             echo "CODECOV_TOKEN not set; skipping coverage upload." >> "$GITHUB_STEP_SUMMARY"
           fi
 
