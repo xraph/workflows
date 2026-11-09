@@ -1,16 +1,57 @@
 name: Release
 
+# There are two ways in. A green Self Test on a push to main runs
+# semantic-release, which reads the conventional commits since the last tag
+# and creates the next vX.Y.Z tag with its GitHub release, or does nothing when
+# only chore, docs or ci commits landed. A vX.Y.Z tag pushed by hand still
+# works as well, for a release that has to be cut outside that flow.
+#
+# Either way the major tag moves here, in the same workflow. It can't be left to
+# a second workflow listening for tag pushes: a tag pushed with GITHUB_TOKEN
+# never triggers another workflow, so the v1 every consumer pins to would stay
+# on the old release.
 on:
+  workflow_run:
+    workflows: [Self Test]
+    types: [completed]
+    branches: [main]
   push:
     tags: ['v[0-9]+.[0-9]+.[0-9]+']
 
 permissions:
-  contents: write
+  contents: read
+
+# Two merges landing close together must not race each other to the next
+# version number.
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
+  semantic:
+    name: Semantic release
+    # `branches: [main]` above also matches a pull request from a fork whose
+    # branch happens to be called main, so check the run came from a push.
+    if: >-
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push'
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    uses: ./.github/workflows/semantic-release.yml
+
   retag:
     name: Move major tag
+    needs: semantic
+    # always() so a hand-pushed tag still gets here with `semantic` skipped.
+    if: >-
+      always() &&
+      (github.event_name == 'push' || needs.semantic.outputs.released == 'true')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -19,16 +60,23 @@ jobs:
 
       - name: Retarget major tag
         shell: bash
+        env:
+          TAG: ${{ github.event_name == 'push' && github.ref_name || format('v{0}', needs.semantic.outputs.version) }}
         run: |
           set -euo pipefail
-          MAJOR="${GITHUB_REF_NAME%%.*}"
+          # The checkout ran before semantic-release pushed its tag, and the
+          # local v1 may be stale, so take whatever the remote has.
+          git fetch --force --tags origin
+          MAJOR="${TAG%%.*}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -f "$MAJOR" "$GITHUB_REF_NAME"
+          git tag -f "$MAJOR" "$TAG"
           git push -f origin "refs/tags/$MAJOR"
-          echo "Moved \`$MAJOR\` to \`$GITHUB_REF_NAME\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "Moved \`$MAJOR\` to \`$TAG\`" >> "$GITHUB_STEP_SUMMARY"
 
+      # semantic-release already published a release for the tags it creates.
       - name: Create GitHub release
+        if: github.event_name == 'push'
         uses: ncipollo/release-action@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
