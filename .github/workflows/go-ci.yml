@@ -67,6 +67,14 @@ on:
         description: 'Fail the build on gosec findings. SARIF is uploaded either way.'
         type: boolean
         default: true
+      security-timeout-minutes:
+        description: 'Cancel the security job after this many minutes. A runner that runs out of memory goes silent without failing, and with no cap GitHub waits close to an hour before giving up on it.'
+        type: number
+        default: 30
+      govulncheck-swap-gb:
+        description: 'Swap to add before govulncheck, in GB. 0 adds none. A large module can need more memory than a private repo runner has (foundry peaks at 11 GB against 7), and with swap the scan finishes slowly where it would otherwise take the runner down.'
+        type: number
+        default: 8
       check-nested-modules:
         description: 'Check that nested go.mod files require their siblings at versions the module proxy can serve. A nested module replace is ignored once the module is somebody else dependency, so a require naming an unpublished version breaks go get for every consumer while every local build keeps working. No-op in a repo with a single go.mod.'
         type: boolean
@@ -445,6 +453,7 @@ jobs:
     needs: setup
     if: ${{ !inputs.skip-security && !inputs.only-test }}
     runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.security-timeout-minutes }}
     permissions:
       contents: read
       security-events: write
@@ -541,6 +550,30 @@ jobs:
             echo "gosec-fail-on-findings is false; reporting only."
           fi
 
+      # govulncheck builds SSA and a call graph across every package the module
+      # pulls in, and on a big dependency tree that costs real memory. Foundry
+      # peaks at 11 GB. A private repo's ubuntu-latest has 7. When the scan
+      # outgrows it, the runner agent gets starved along with everything else,
+      # so the job ends in "The hosted runner lost communication with the
+      # server" and exit code 143, neither of which mentions memory.
+      #
+      # Swap is free on a hosted runner, unlike a larger machine. The scan slows
+      # down once it spills over, but it finishes. Best effort: if a future runner image moves /mnt,
+      # you still get the scan, just without the extra room.
+      - name: Add swap for govulncheck
+        if: inputs.govulncheck-swap-gb > 0
+        continue-on-error: true
+        env:
+          SWAP_GB: ${{ inputs.govulncheck-swap-gb }}
+        run: |
+          set -euo pipefail
+          free -m
+          sudo fallocate -l "${SWAP_GB}G" /mnt/govulncheck.swap
+          sudo chmod 600 /mnt/govulncheck.swap
+          sudo mkswap /mnt/govulncheck.swap > /dev/null
+          sudo swapon /mnt/govulncheck.swap
+          free -m
+
       - name: Run govulncheck
         env:
           GOVULNCHECK_VERSION: ${{ inputs.govulncheck-version }}
@@ -548,6 +581,15 @@ jobs:
         run: |
           set -euo pipefail
           go install "golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION"
+          # Cap the heap at 60% of the machine's RAM, so the garbage collector
+          # works harder before the scan reaches for swap. On foundry a 4 GiB
+          # cap took the peak from 11.2 GB to 7.5 GB, for about three times
+          # the run time. It's a soft limit: Go goes over it before it fails,
+          # so a module whose live heap is bigger still finishes, on swap. A
+          # small module never gets near the cap, so it pays nothing for it.
+          MEM_KB=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
+          export GOMEMLIMIT="$(( MEM_KB * 6 / 10 / 1024 ))MiB"
+          echo "GOMEMLIMIT=${GOMEMLIMIT}"
           # Always report; decide separately whether findings block the build.
           if govulncheck ./... 2>&1 | tee govulncheck.log; then
             echo "- govulncheck: no reachable vulnerabilities" >> "$GITHUB_STEP_SUMMARY"
