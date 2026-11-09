@@ -319,6 +319,32 @@ while letting the build pass. Name the specific advisory in a comment where you
 set it, and flip it back when upstream ships a fix. `gosec-fail-on-findings`
 behaves the same way, and both default to `true`.
 
+### When govulncheck runs out of memory
+
+If your security job dies with exit code 143 and the annotation says "The
+hosted runner lost communication with the server", the scan ran the runner out
+of memory. It never prints a word about memory, so it's easy to read as a flaky
+runner.
+
+govulncheck builds a call graph across every package your module depends on.
+On a large tree that is expensive: foundry peaks at 11 GB, and a private repo's
+`ubuntu-latest` has 7 (public repos get 16, which is why the same scan can pass
+in one repo and kill the runner in another). The job handles this in two ways.
+It caps the Go heap at 60% of the machine's RAM, which on foundry brought the
+peak down to 7.5 GB, and it adds 8 GB of swap so whatever is left over spills
+to disk and the scan finishes slowly.
+
+You can tune both:
+
+```yaml
+with:
+  govulncheck-swap-gb: 12         # 0 skips the swap step
+  security-timeout-minutes: 45    # default 30
+```
+
+The timeout is there so a runner that does die gets cancelled in half an hour.
+Without it GitHub waits close to an hour before it marks the job failed.
+
 ## Rust track
 
 `rust-ci.yml` runs lint (rustfmt + clippy), a security audit (`cargo-audit`),
