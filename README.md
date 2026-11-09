@@ -127,6 +127,20 @@ analyzer sees. Squashing genuine `fix:` or `feat:` commits under a `ci:` or
 gone. This already happened once here, on `xraph/confy` PR #1. Title the PR with
 the highest-impact type it contains.
 
+## How this repo releases
+
+You don't tag anything by hand. Once Self Test passes on a push to `main`,
+`release.yml` runs `semantic-release.yml` against this repo, creates the next
+`vX.Y.Z` tag and its GitHub release from the conventional commits since the
+last one, and moves `v1` to it. A merge with only `chore:`, `docs:` or `ci:`
+commits releases nothing, and `v1` stays where it is.
+
+Pushing a `vX.Y.Z` tag yourself still works and moves `v1` the same way.
+
+There's no `CHANGELOG.md`. `main` requires the Self Test Gate check, so a commit
+pushed by the release bot would be rejected, and the release notes live on the
+GitHub release instead.
+
 ## Binary track
 
 `go-binary-release.yml` wraps GoReleaser. The consumer repository owns its
